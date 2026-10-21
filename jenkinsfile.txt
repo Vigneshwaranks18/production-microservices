@@ -1,0 +1,42 @@
+pipeline {
+    agent any
+    environment {
+        AWS_ACCOUNT_ID = '676787763280' // Replace with your AWS Account ID
+        AWS_REGION     = 'ap-south-1'     // Replace with your ECR region
+        IMAGE_NAME     = 'my-application'
+        IMAGE_TAG      = "${BUILD_NUMBER}"
+        K3S_NODE_IP    = '172.31.14.252'    // Private IP of your k3s-cluster instance
+    }
+    stages {
+        stage('Git Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+        stage('Docker Build') {
+            steps {
+                sh "docker build -t ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}://{IMAGE_NAME}:${IMAGE_TAG} ."
+            }
+        }
+        stage('Push to AWS ECR') {
+            steps {
+                // Securely log in to AWS ECR using AWS credentials configured in Jenkins
+                withCredentials([[cat: 'aws-creds', credentialsId: 'aws-credentials']]) {
+                    sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+                    sh "docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}://{IMAGE_NAME}:${IMAGE_TAG}"
+                }
+            }
+        }
+        stage('Deploy to Kubernetes') {
+            steps {
+                // Dynamically update the manifest file with the new image tag and deploy via SSH
+                withCredentials([sshUserPrivateKey(credentialsId: 'k3s-ssh-key', keyFileVariable: 'IDENTITY')]) {
+                    sh """
+                        sed -i 's|IMAGE_PLACEHOLDER|${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}://{IMAGE_NAME}:${IMAGE_TAG}|g' k8s/deployment.yml
+                        scp -i ${IDENTITY} -o StrictHostKeyChecking=no k8s/deployment.yml ubuntu@${K3S_NODE_IP}:/tmp/deployment.yml
+                        ssh -i ${IDENTITY} -o StrictHostKeyChecking=no ubuntu@${K3S_NODE_IP} "sudo kubectl apply -f /tmp/deployment.yml"
+                    """
+                }
+            }
+        }
+    }
